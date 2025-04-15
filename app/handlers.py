@@ -6,6 +6,9 @@ from aiogram.fsm.context import FSMContext
 import requests
 from bs4 import BeautifulSoup
 import app.keyboards as kb
+import sqlite3
+
+
 
 from jokeapi import Jokes  # Import the Jokes class
 
@@ -21,56 +24,78 @@ class Survey(StatesGroup):
     fav_film = State()
     fav_food = State()
     fav_game = State()
+    fav_color = State()
+
+def get_db_connection():
+    conn = sqlite3.connect("survey.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS survey (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT,
+            surname TEXT,
+            age INTEGER,
+            fav_thing TEXT,
+            fav_film TEXT,
+            fav_food TEXT,
+            fav_game TEXT,
+            fav_color TEXT
+            
+        )
+    ''')
+    conn.commit()
+    return conn
 
 
-# def get_films():
-#     url = "https://cinematica.kg/cinema/6"
-#     headers = {
-#         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-#     }
-#     response = requests.get(url, headers=headers)
-#     soup = BeautifulSoup(response.text, 'lxml')
-#
-#     movies = []
-#     movie_section = soup.find_all('div', class_="halls")
-#
-#     for film in movie_section:
-#         title = film.find_all('div', class_='hall-item')
-#         if title:
-#             movies.append(title.text.strip())
-#
-#     return movies
 
 
-# print(get_films())
+def get_movies():
+    url = "https://kg.kinoafisha.info/bishkek/movies/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
 
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
 
+            movies = [
+                movie.text.strip()
+                for movie in soup.select(".movieItem_title")
+                if movie.text.strip()
+            ]
+
+            return (
+                "Фильмы в прокате:\n" + "\n".join(movies)
+                if movies else "Не удалось найти фильмы."
+            )
+        return "Ошибка соединения."
+    except Exception:
+        return "Ошибка. Не удалось загрузить фильмы."
 
 
 
 
 def get_weather():
-    url = 'https://www.gismeteo.ru/weather-bishkek-5327/'
+    url = 'https://wttr.in/Bishkek?format=%C|%t|%w|%h'
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, 'lxml')
 
-    temperature = soup.find('temperature-value', {'from-unit': 'c'})
-    if temperature:
-        temperature = temperature['value']
-    else:
-        temperature = "Температура не найдена"
-
-    feel_temperature = soup.find('div', class_='weather-feel')
-    if feel_temperature:
-        feel_temperature = feel_temperature.find('temperature-value', {'from-unit': 'c'})['value']
-    else:
-        feel_temperature = "Не указано"
-
-    weather_info = f"В Бишкеке\nТемпература: {temperature}°C\nПо ощущениям: {feel_temperature}°C"
-    return weather_info
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            weather, temp, wind, humidity = response.text.strip().split("|")
+            return (f"Погода в Бишкеке сейчас:\n"
+                    f"Температура: {temp}\n"
+                    f"Влажность: {humidity}\n"
+                    f"Ветер: {wind}\n")
+        else:
+            return "Ошибка при запросе погоды."
+    except Exception:
+        return "Не удалось получить прогноз."
 
 def get_exchange_rates():
     url = 'https://valuta.kg/'
@@ -79,22 +104,32 @@ def get_exchange_rates():
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'lxml')
 
-        rates = {}
+        tables = soup.find_all("table", class_="kurs-table")
+        if not tables:
+            return "Не удалось найти таблицу с курсами валют."
 
-        table = soup.find('div', class_="kurs-bar__rates")
+        currencies = []
+        currency_table = tables[1] if len(tables) > 1 else None
+        if currency_table is None:
+            return "Не удалось найти таблицу с нужными курсами."
 
-        rows = table.find_all('tr')
+        rows = currency_table.find_all("tr")
+        currency_names = [".","USD", "EUR", "RUB", "KZT", "CNY", "GBP"]
 
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) >= 2:
-                currency = cols[0].text.strip()
-                rate = cols[1].text.strip()
-                rates[currency] = rate
+        currency_info = []
+        for i, row in enumerate(rows):
+            cols = row.find_all("td")
+            if len(cols) == 2 and i < len(currency_names):
+                buy_rate = cols[0].text.strip()
+                sell_rate = cols[1].text.strip()
+                currency_info.append(f"{currency_names[i]}: Покупка {buy_rate} / Продажа {sell_rate}")
 
-        return rates
+        if not currency_info:
+            return "Не удалось найти данные по валютам."
+
+        return '\n'.join(currency_info)
     else:
-        return f"Ошибка загрузки данных: {response.status_code}"
+        return f"Ошибка при запросе данных: {response.status_code}"
 
 @router.message(F.text == 'Шутки')
 async def send_jokes_catalog(message: Message):
@@ -117,21 +152,11 @@ async def send_jokes_black(callback: CallbackQuery):
 
 @router.message(F.text == 'Фильмы')
 async def send_films(message: Message):
-    await message.answer('Фильмы на сегодня:\n'
-                         'Белоснежка\n'
-                         'Микки 17\n'
-                         'Өч\n'
-                         'Новокаин\n'
-                         'Ашыгым\n'
-                         'Астрал. Спуск к дьяволу\n'
-                         'Novocaine (ENG.)\n'
-                         'Сырдуу Самарканд\n'
-                         'Чёрный чемодан – двойная игра')
-    # films = get_films()
-    # if films:
-    #     await message.answer("\n".join(films))
-    # else:
-    #     await message.answer("Не удалось найти расписание фильмов.")
+    films = get_movies()
+    if films:
+        await message.answer(films)
+    else:
+        await message.answer("Не удалось найти расписание фильмов.")
 
 
 
@@ -143,15 +168,15 @@ async def send_weather(message: Message):
 
 @router.message(F.text == 'Курс валют')
 async def currency_command(message: Message):
-    rates = get_exchange_rates()
-    if rates:
-        response = "Курсы валют:\n"
-        for currency, rate in rates.items():
-            response += f"{currency}: {rate}\n"
-        await message.answer(response, reply_markup=kb.main)
-        await message.answer('вот сайт https://valuta.kg/')
+    currencies = get_exchange_rates()
+
+    if isinstance(currencies, str):
+        await message.answer(currencies, reply_markup=kb.main)
     else:
-        await message.answer("Не удалось получить данные о курсах валют. Попробуйте позже.")
+        response = "Доступные валюты:\n"
+        for currency in currencies:
+            response += f"{currency}\n"
+        await message.answer(response, reply_markup=kb.main)
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -193,8 +218,32 @@ async def basketball(callback: CallbackQuery):
 
 @router.message(F.text == 'Опрос')
 async def survey(message: Message, state: FSMContext):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    user_id = message.from_user.id
+
+    cursor.execute("SELECT * FROM survey WHERE user_id = ?", (user_id,))
+    existing_data = cursor.fetchone()
+    if existing_data:
+        await message.answer("Вы уже проходили опрос. Вот ваши ответы:")
+        result_text = (
+            f"1. Имя: {existing_data[2]}\n"
+            f"2. Фамилия: {existing_data[3]}"
+            f"2. Возраст: {existing_data[4]}\n"
+            f"3. Любимый предмет: {existing_data[5]}\n"
+            f"4. Любимый фильм: {existing_data[6]}\n"
+            f"5. Любимая еда: {existing_data[7]}\n"
+            f"6. Любимая игра: {existing_data[8]}\n"
+            f"7. Любимое блюдо: {existing_data[9]}\n"
+
+        )
+        await message.answer(result_text)
+        conn.close()
+        return
+
+    await message.answer("Как вас зовут?")
     await state.set_state(Survey.name)
-    await message.answer('Введите ваше имя')
+    conn.close()
 
 @router.message(Survey.name)
 async def survey_name(message: Message, state: FSMContext):
@@ -233,17 +282,50 @@ async def survey_name(message: Message, state: FSMContext):
     await message.answer('Введите вашу любимую игру')
 
 @router.message(Survey.fav_game)
-async def survey_fav_game(message: Message, state: FSMContext):
+async def survey_name(message: Message, state: FSMContext):
     await state.update_data(game=message.text)
+    await state.set_state(Survey.fav_color)
+    await message.answer('Введите ваш любимый цвет')
+
+@router.message(Survey.fav_color)
+async def survey_fav_game(message: Message, state: FSMContext):
+    await state.update_data(color=message.text)
     data = await state.get_data()
-    await message.answer(f'Имя: {data["name"]}\n'
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+                INSERT INTO survey (user_id, name, surname, age, fav_thing, fav_film, fav_food, fav_game, fav_color)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+            message.from_user.id,
+            data.get('name'),
+            data.get('surname'),
+            data.get('age'),
+            data.get('fav_thing'),
+            data.get('film'),
+            data.get('food'),
+            data.get('color'),
+            message.text
+        ))
+        conn.commit()
+
+        result_answers = (f'Имя: {data["name"]}\n'
                          f'Фамилия: {data["surname"]}\n'
                          f'Возраст: {data["age"]}\n'
                          f'Любимый предмет в школе: {data["fav_thing"]}\n'
                          f'любимый фильм: {data["film"]}\n'
                          f'Любимая еда: {data["food"]}\n'
-                         f'Любимая игра: {data["game"]}')
-    await state.clear()
+                         f'Любимая игра: {data["game"]}\n'
+                         f'Любимый цвет: {data["color"]}')
+        await message.answer(result_answers, parse_mode="Markdown")
+    except Exception as e:
+        await message.answer("Произошла ошибка при сохранении данных")
+        print(f"Database error: {str(e)}")
+
+    finally:
+        conn.close()
+        await state.clear()
 
 
 
